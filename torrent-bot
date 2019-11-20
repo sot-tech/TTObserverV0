@@ -1,0 +1,195 @@
+#!/bin/bash
+
+#BSD-2-Clause
+#Copyright (c) 2016, c-rho-272 (PR_SOT, PR_713)
+#All rights reserved.
+#
+#Redistribution and use in source and binary forms, with or without
+#modification, are permitted provided that the following conditions are met:
+#
+#* Redistributions of source code must retain the above copyright notice, this
+#  list of conditions and the following disclaimer.
+#* Redistributions in binary form must reproduce the above copyright notice,
+#  this list of conditions and the following disclaimer in the documentation
+#  and/or other materials provided with the distribution.
+#
+#THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+#AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+#IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+#ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+#LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+#CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+#SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+#INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+#CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+#ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+#POSSIBILITY OF SUCH DAMAGE.
+
+# config_file format:
+#
+# out_log_file=/path/to/log
+# err_log_file=/path/to/log
+# target_base_url=http://someurl
+# target_crawl_treshold=5
+# transmission_url=address:port
+# transmission_creds=login:password
+# transmission_down_dir=/some/path/on/server
+
+prog_root="$(dirname "$(realpath "$0")")"
+
+if [ "$1" != "" ]; then
+	conf_root="$1"
+else
+	>&2 echo "Config directory not set, using $prog_root/conf"
+	conf_root="$prog_root/conf"
+fi
+
+config_file="$conf_root/target.config"
+target_offset_file="$conf_root/target.offset"
+
+function err {
+	>&2 echo "$(date "+%Y-%m-%d %H:%M:%S")	ERR:	$@"
+}
+
+function warn {
+	>&2 echo "$(date "+%Y-%m-%d %H:%M:%S")	WARN:	$@"
+}
+
+function info {
+	echo "$(date "+%Y-%m-%d %H:%M:%S")	INFO:	$@"
+}
+
+function check_app {
+	app="$1"
+	if [ "$app" != "" ] && ! which $app > /dev/null; then
+		err "Required application not found: $app"
+		return 1
+	fi
+	return 0
+}
+
+req_apps=(tee sed grep cat curl awk tr sort jq transmission-show transmission-remote)
+
+if ! source "$config_file"; then
+	err "Config file $config_file not found"
+	exit 1
+fi
+
+if [ "$(cat "$target_offset_file" 2> /dev/null | tr -d '[:space:]')" == "" ]; then
+	err "Target offset not set"
+	exit 1
+fi
+
+if [ "$out_log_file" == "" ]; then
+	out_log_file=out.log
+fi
+exec > >(tee -ia "$out_log_file")
+
+if [ "$err_log_file" == "" ]; then
+	err_log_file=err.log
+fi
+exec 2> >(tee -ia "$err_log_file")
+
+if [ "$transmission_creds" != "" ]; then
+	transmission_creds="-n $transmission_creds"
+fi
+
+if [ "$transmission_down_dir" != "" ]; then
+	transmission_down_dir="-w $transmission_down_dir"
+fi
+
+function cache_target_offset {
+	echo -n $1 > "$target_offset_file"
+	sync
+	let next_offset=${1}+1
+	info "Next offset: $next_offset"
+}
+
+function announce {
+	echo "$@"
+}
+
+function notify {
+	echo "$@"
+}
+
+function upload_torrent {
+	local result=1
+	local url=$1
+	local tmp_file=$(mktemp -u)
+	curl -s -o "$tmp_file" "$url"
+	if file "$tmp_file" | grep BitTorrent > /dev/null; then
+		info "Found torrent at $url"
+		torrent_info=$(transmission-show "$tmp_file")
+		torrent_name=$(echo "$torrent_info" | grep '^Name:' | sed 's/Name: //g')
+		if [ "$torrent_name" == "" ]; then
+			err "Torrent name not defined"
+		else
+			info "Searching for old torrent $torrent_name"
+			existing_torrent=$(transmission-remote "$transmission_url" $transmission_creds -l | grep -P "  +\Q${torrent_name}\E$")
+			if [ "$existing_torrent" == "" ]; then
+				warn "Old torrent for name $torrent_name not found."
+			else
+				torrent_id=$(echo "$existing_torrent" | awk '{print $1}' | tr -d '[:punct:][:space:][:alpha:]')
+				if [ "$torrent_id" == "" ]; then
+					err "Id for existing torrent $existing_torrent not found"
+				else
+					transmission-remote "$transmission_url" $transmission_creds -t $torrent_id -r
+					info "Previous torrent $torrent_name (id: $torrent_id) has been deleted"
+				fi
+			fi
+			if transmission-remote "$transmission_url" $transmission_creds -a "$tmp_file" $transmission_down_dir --no-start-paused; then
+				info "Added new torrent $torrent_name"
+			else
+				err "Unable to add torrent $torrent_name!"
+			fi
+		fi
+		local result=0
+	fi
+	rm -f "$tmp_file"
+	return $result
+}
+
+if [ -e "$prog_root/torrent-bot_plugins" ]; then
+	source "$prog_root/torrent-bot_plugins"
+	export transmission_url transmission_creds transmission_down_dir err_log_file out_log_file target_offset_file target_base_url
+	export -f err warn info cache_target_offset upload_torrent
+	start_watchers
+fi
+
+for app in "${req_apps[@]}"; do
+	check_app "$app" || exit 1
+done
+
+info "Init complete
+out_log_file=$out_log_file
+err_log_file=$err_log_file
+target_base_url=$target_base_url
+target_crawl_treshold=$target_crawl_treshold
+transmission_url=$transmission_url
+transmission_creds=$([ "$transmission_creds" == "" ] && echo EMPTY || echo SET)
+transmission_down_dir=$transmission_down_dir"
+
+while true; do
+	if [ "$X_DEBUG" == "true" ]; then
+		read ttt_rrr
+	fi
+	target_offset=$(cat "$target_offset_file" 2> /dev/null | tr -d '[:space:]')
+	let ++target_offset
+	let max_offset=$target_offset+$target_crawl_treshold
+	for n in $(seq $target_offset $max_offset); do
+		full_url="${target_base_url}${n}"
+		if upload_torrent "$full_url"; then
+			echo -n $n > "$target_offset_file"
+			info "Next offset: $target_offset"
+			sync
+			announce "$torrent_info" "$full_url"
+			if [ "$(($n%1000))" == "0" ]; then
+				notify "$n GET"
+			fi
+		fi
+		
+	done
+	let sleep_time=5+$RANDOM%25
+	sleep $sleep_time
+done

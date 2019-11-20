@@ -1,0 +1,535 @@
+#!/bin/bash
+
+#BSD-2-Clause
+#Copyright (c) 2017, c-rho-272 (PR_SOT, PR_713)
+#All rights reserved.
+#
+#Redistribution and use in source and binary forms, with or without
+#modification, are permitted provided that the following conditions are met:
+#
+#* Redistributions of source code must retain the above copyright notice, this
+#  list of conditions and the following disclaimer.
+#* Redistributions in binary form must reproduce the above copyright notice,
+#  this list of conditions and the following disclaimer in the documentation
+#  and/or other materials provided with the distribution.
+#
+#THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+#AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+#IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+#ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+#LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+#CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+#SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+#INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+#CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+#ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+#POSSIBILITY OF SUCH DAMAGE.
+
+# config_file format:
+# telegram_token=12345:abracadabra
+# telegram_otp_seed=random_string_in_base32
+# telegram_cmd_tag='/command_to_respond_in_group'
+# telegram_announce_info_regexp_to_extract=regexp_to_filter_info_fields
+# telegram_announce_info_regexp_replace=(regexps to replace some values in info)
+# telegram_announce_template=some_teplate_in_C_style_format
+# telegram_msg_template=some_teplate_in_C_style_format
+
+telegram_config_file="$conf_root/telegram.config"
+
+if ! source "$telegram_config_file"; then
+	err "Telegram plugin config not found"
+	return
+fi
+
+telegram_chats_file="$conf_root/telegram.chats"
+telegram_chats_file_pending="${telegram_chats_file}.pending"
+if ! [ -e "$telegram_chats_file" ]; then
+	warn "Chats file not exist"
+fi
+
+telegram_offset_file="$conf_root/telegram.offset"
+
+if [ "$telegram_otp_seed" == "" ]; then
+	err "TOTP secret not set"
+	return
+fi
+
+if [ "$telegram_token" == "" ]; then
+	err "Telegram bot token not set"
+	return
+fi
+
+telegram_base_url="https://api.telegram.org/bot${telegram_token}"
+
+if ! check_app oathtool; then
+	warn "oathtool not found, cannot continue"
+	return
+fi
+
+if [ "$telegram_announce_template" == "" ]; then
+	warn "Telegram announce message temlate not set"
+fi
+
+if [ "$telegram_msg_template" == "" ]; then
+	warn "Telegram message temlate not set"
+fi
+
+function t_send_msg {
+	local chat_id="${1//;*/}"
+	local msg="$2"
+	local format="$3"
+	local data=$(jq -cMn \
+		--arg id "${chat_id//;*/}" \
+		--arg pm "$format" \
+		--arg msg "$msg" \
+		'{"chat_id":$id,"parse_mode":$pm,"text":$msg}')
+	curl -s --header 'Content-Type: application/json' -X 'POST' --data "$data" "$telegram_base_url/sendMessage" | jq -M .
+}
+
+function t_send_file {
+	local chat_id="${1//;*/}"
+	local out_file="$2"
+	curl -s -X POST -F chat_id="$chat_id" -F document="@${out_file}" "$telegram_base_url/sendDocument" 
+}
+
+function t_parse_args {
+	local expect_key=true
+	local key
+	local is_key
+	unset t_parsed_args
+	declare -gA t_parsed_args
+	
+	for arg in "$@"; do
+		if [ "$arg" != "" ]; then
+			if echo "$arg" | grep "^--" &> /dev/null; then
+				is_key=true
+			else
+				is_key=false
+			fi
+			if [ "$expect_key" == "$is_key" ]; then
+				if $expect_key; then
+					local key="${arg//--/}"
+					local expect_key=false
+				else
+					t_parsed_args["$key"]="$arg"
+					local expect_key=true
+				fi
+			else
+				return 1
+			fi
+		fi
+	done
+	return 0
+}
+
+function t_err {
+	t_send_msg "$1" "${2}!! $3"
+}
+
+function t_arg_err {
+	t_err "$1" "$2" "ARGUMENT"
+}
+
+function t_otp_err {
+	t_err "$1" "$2" "AUTH"
+}
+
+function t_exist_err {
+	t_err "$1" "$2" "EXIST"
+}
+
+function t_not_exist_err {
+	t_err "$1" "$2" "NONEXIST"
+}
+
+function t_ok {
+	local msg
+	if [ "$3" != "" ]; then
+		local msg=$(printf '>%s' "$3")
+	fi
+	t_send_msg "$1" "${2}__ ACK${msg}" "$4"
+}
+
+function t_check_otp {
+	if [ "$1" == "$(oathtool --totp -b $telegram_otp_seed)" ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+function t_validate {
+	local args=("$@")
+	local func="${args[0]}"
+	local chat="${args[1]}"
+	if t_parse_args "${args[@]:2}"; then
+		if t_check_otp "${t_parsed_args[otp]}"; then
+			return 0
+		else
+			t_otp_err "$chat" "$func"
+		fi
+	else
+		t_arg_err "$chat" "$func"
+	fi
+	return 1
+}
+
+function t_validate_chat {
+	if grep -P "^\Q${2}\E$" "$telegram_chats_file" &> /dev/null; then
+		return 0
+	else
+		t_err "$2" "$1" "GREETING"
+	fi
+	return 1
+}
+
+function t_attach {
+	if t_validate "attach" "$@"; then
+		local chat_name=$(echo "${t_parsed_args[name]}" | tr -d '[:space:]')
+		local chat_id=$(echo "${t_parsed_args[id]}" | tr -d '[:space:]')
+		if [ "$chat_id" != "" ]; then
+			if [ "$chat_id" == "this" ]; then
+				local chat_id="${1//;*/}"
+			fi
+			if echo "$chat_id" | grep -E '^-?[[:digit:]]+$' &> /dev/null; then
+				if grep -P "^\Q${chat_id}\E;.*?$" "$telegram_chats_file" &> /dev/null; then
+					t_exist_err "$1" "attach"
+				else
+					local filtered_pending=$(grep -vP "^-?[[:digit:]]+;\Q${chat_id}\E;.*?$" "$telegram_chats_file_pending" 2> /dev/null)
+					echo "$filtered_pending" > "$telegram_chats_file_pending"
+					local chat_name=$(curl -s -X GET -F "chat_id=$chat_id" "$telegram_base_url/getChat" | jq -r '.result.username')
+					echo "$chat_id;$chat_name" >> "$telegram_chats_file"
+					local chats_unq=$(cat "$telegram_chats_file" | sort -u)
+					echo "$chats_unq" > "$telegram_chats_file"
+					sync
+					t_ok "$1" "attach"
+				fi
+			else
+				t_arg_err "$1" "attach"
+			fi
+		elif [ "$chat_name" != "" ]; then
+			if [ "$chat_name" == "this" ]; then
+				local chat_name="${1//*;/}"
+				local chat_id="${1}"
+			fi
+			if echo "$chat_name" | grep -P "^\w+$" &> /dev/null; then
+				if grep -P "^-?[[:digit:]]+;\Q${chat_name}\E$" "$telegram_chats_file" &> /dev/null; then
+					t_exist_err "$1" "attach"
+				else
+					if [ "$chat_id" == "" ]; then
+						local chat_id=$(grep -P "^-?[[:digit:]]+;-?[[:digit:]]+;\Q${chat_name}\E$" \
+							"$telegram_chats_file_pending" 2> /dev/null | sed -E 's/^-?[[:digit:]]+?;//g')
+					fi
+					if [ "$chat_id" != "" ]; then
+						local filtered_pending=$(grep -vP "^-?[[:digit:]+;\Q${chat_id}\E$" "$telegram_chats_file_pending" 2> /dev/null)
+						echo "$filtered_pending" > "$telegram_chats_file_pending"
+						echo "$chat_id" >> "$telegram_chats_file"
+						local chats_unq=$(cat "$telegram_chats_file" | sort -u)
+						echo "$chats_unq" > "$telegram_chats_file"
+						sync
+						t_ok "$1" "attach"
+					else
+						t_err "$1" "attach" "GREETING"
+					fi
+				fi
+			else
+				t_arg_err "$1" "attach"
+			fi
+		else
+			t_arg_err "$1" "attach"
+		fi
+	fi
+}
+
+function t_detach {
+	if t_validate "detach" "$@"; then
+		local chat_name=$(echo "${t_parsed_args[name]}" | tr -d '[:space:]')
+		local chat_id=$(echo "${t_parsed_args[id]}" | tr -d '[:space:]')
+		local del_regex
+		if [ "$chat_id" != "" ]; then
+			if [ "$chat_id" == "this" ]; then
+				local chat_id="${1//;*/}"
+			fi
+			if echo "$chat_id" | grep -E '^-?[[:digit:]]+$' &> /dev/null; then
+				local del_regex="^\Q${chat_id}\E;.*?$"
+			else
+				t_arg_err "$1" "detach"
+ 				return
+			fi
+		elif [ "$chat_name" != "" ]; then
+			if [ "$chat_name" == "this" ]; then
+				local chat_name="${1//*;/}"
+			fi
+			if echo "$chat_name" | grep -P "^\w+$" &> /dev/null; then
+				local del_regex="^-?[[:digit:]]+;\Q${chat_name}\E$"
+			else
+				t_arg_err "$1" "detach"
+				return
+			fi
+		else
+			t_arg_err "$1" "detach"
+			return
+		fi
+		if [ "$del_regex" != "" ] && grep -P "$del_regex" "$telegram_chats_file" &> /dev/null; then
+			local filtered_pending=$(grep -vP "$del_regex" "$telegram_chats_file" 2> /dev/null)
+			echo "$filtered_pending" > "$telegram_chats_file"
+			local chats_unq=$(cat "$telegram_chats_file" | sort -u)
+			echo "$chats_unq" > "$telegram_chats_file"
+			sync
+			t_ok "$1" "detach"
+		else
+			t_not_exist_err "$1" "detach"
+		fi
+	fi
+}
+
+function t_offset {
+	if t_validate "offset" "$@"; then
+		local offset_set=$(echo "${t_parsed_args[set]}" | tr -d '[:space:]')
+		if [ "$offset_set" != "" ]; then
+			if echo "$offset_set" | grep -P "^[[:digit:]]$" &> /dev/null; then
+				t_arg_err "$1" "offset"
+				return
+			else
+				for i in {1..3}; do
+					echo "$offset_set" > "$target_offset_file"
+					sync
+					sleep 1
+				done
+			fi
+		fi
+		t_ok "$1" "offset" "$(cat $target_offset_file)"
+	fi
+}
+
+function t_ehlo {
+	local chat_id="${1//;*/}"
+	if grep -P "^\Q$chat_id\E;\w+$" "$telegram_chats_file" &> /dev/null; then
+		t_exist_err "$1" "ehlo"
+	elif grep -P "^-?[[:digit:]]+;\Q$chat_id\E;\w+$" "$telegram_chats_file_pending" &> /dev/null; then
+		t_err "$1" "ehlo" "PENDING"
+	else
+		echo "$(date +%s);$1" >> "$telegram_chats_file_pending"
+		t_ok "$1" "ehlo" "ENQUIRE"
+	fi
+}
+
+function t_status {
+	local chat_id="${1//;*/}"
+	if grep -P "^\Q$chat_id\E;\w+$" "$telegram_chats_file" &> /dev/null; then
+		t_ok "$1" "status" "EXIST"
+	elif grep -P "^-?[[:digit:]]+;\Q$chat_id\E;\w+$" "$telegram_chats_file_pending" &> /dev/null; then
+		t_ok "$1" "status" "PENDING"
+	else
+		t_ok "$1" "status" "NONEXIST"
+	fi
+}
+
+function t_download {
+	if t_validate "download" "$@"; then
+		local url="${t_parsed_args[url]}"
+		if [ "$url" != "" ]; then
+			if upload_torrent "$url"; then
+				t_ok "$1" "download"
+			else
+				t_not_exist_err "$1" "download"
+			fi
+		else
+			t_arg_err "$1" "download"
+		fi
+	fi
+}
+
+function t_list {
+	if t_validate "list" "$@"; then
+		local torrent_name=$(echo "${t_parsed_args[name]}")
+		local torrent_id=$(echo "${t_parsed_args[id]}" | tr -d '[:space:]')
+		local backend="${t_parsed_args[backend]}"
+		local torrent_name="${torrent_name%\"}"
+		local torrent_name="${torrent_name#\"}"
+		if [ "$backend" == "" ]; then
+			local backend="$transmission_url"
+		fi
+		if [ "$torrent_id" != "" ]; then
+			if ! echo "$torrent_id" | grep -E '^(-?[[:digit:]]+,?)+$|^all$' &> /dev/null; then
+				t_arg_err "$1" "list"
+ 				return
+			fi
+		elif [ "$torrent_name" != "" ]; then
+			local torrent_info=$(transmission-remote "$backend" $transmission_creds -l | grep -P "  +${torrent_name}$")
+			if [ "$torrent_info" != "" ]; then
+				local torrent_id=$(echo "$torrent_info" | awk '{print $1}' | tr -d '[:punct:][:alpha:]' | tr '\n' ',')
+			fi
+		else
+			t_arg_err "$1" "list"
+			return
+		fi
+		if [ "$torrent_id" != "" ]; then
+			local info=$(transmission-remote "$backend" $transmission_creds -t "$torrent_id" -l)
+			if [ "$info" != "" ]; then
+				if [ $(echo "$info" | wc -l) -gt 3 ]; then
+					local tmp_file=$(mktemp -u torrent_XXXXXXXXXX.txt -p)
+					echo "$info" > "$tmp_file"
+					t_ok "$1" "list" "SOF"
+					t_send_file "$1" "$tmp_file"
+					t_ok "$1" "list" "EOF"
+					rm -f "$tmp_file"
+				else
+					local msg=$(printf '\n```%s```' "$info")
+					t_ok "$1" "list" "$msg" "Markdown"
+				fi
+			else
+				t_not_exist_err "$1" "list"
+			fi
+		else
+			t_not_exist_err "$1" "list"
+			return
+		fi
+	fi
+}
+
+function t_help {
+	local help=$(echo '```
+	help
+	ehlo
+	status
+	attach	--otp arg --id|--name arg 
+	detach	--otp arg --id|--name arg
+	offset	--otp arg [--set arg]
+	download	--otp arg --url arg
+	list	--otp arg --id|--name arg [--backend arg]
+	```')
+	t_ok "$1" "help" "$help" "Markdown"
+}
+
+function t_cnf {
+	t_send_msg "$1" "${2}?? CNF" 
+}
+
+function t_watcher {
+	local sleep_time=5
+	local cleanup_interval=120
+	local cleanup_ticks=$(($cleanup_interval/$sleep_time))
+	local timer=0
+	telegram_bot_self_name=$(curl -s -X GET "$telegram_base_url/getMe" | jq -r '.result.username' | tr -d '[:space:]')
+	if [ "$telegram_bot_self_name" == "" ]; then
+		warn "Telegram bot self name not set"
+	else
+		export telegram_bot_self_name="@${telegram_bot_self_name}"
+	fi
+	while true; do
+		local timer=$(($timer+1))
+		telegram_offset=$(cat "$telegram_offset_file" 2> /dev/null | tr -d '[:space:]')
+		if [ "$telegram_offset" != "" ]; then
+			let ++telegram_offset
+			local telegram_offset_arg="-F offset=$telegram_offset"
+		else
+			telegram_offset=0
+		fi
+		export telegram_offset
+		curl -s -X 'GET' $telegram_offset_arg "$telegram_base_url/getUpdates" |
+			jq -r '.result[] | "\(.update_id) \(.message.chat.id);\(.message.chat.username) \(.message.text)", 
+				"\(.update_id) \(.channel_post.chat.id);\(.channel_post.chat.username) \(.channel_post.text)"' | sort |
+		while IFS= read -r msg; do
+			msg=($msg)
+			local new_offset=${msg[0]}
+			local chat="${msg[1]}"
+			local chat_id="${chat//;*/}"
+			if echo "$chat_id" | grep -E '^-?[[:digit:]]+$' &> /dev/null; then
+				cmd=(${msg[*]:2})
+				if echo "${cmd[0]}" | grep -P "^(\Q$telegram_cmd_tag\E)?\Q$telegram_bot_self_name\E:?$" &> /dev/null; then
+					func=${cmd[1]}
+					args=(${cmd[*]:2})
+					case $func in
+						help)
+							t_help "$chat"
+						;;
+						ehlo)
+							t_ehlo "$chat"
+						;;
+						status)
+							t_status "$chat"
+						;;
+						attach)
+							t_attach "$chat" "${args[@]}"
+						;;
+						detach)
+							t_detach "$chat" "${args[@]}"
+						;;
+						offset)
+							t_offset "$chat" "${args[@]}"
+						;;
+						download)
+							t_download "$chat" "${args[@]}"
+						;;
+						list)
+							t_list "$chat" "${args[@]}"
+						;;
+						*)
+							t_cnf "$chat_id" "$func"
+						;;
+					esac
+				fi
+			fi
+			if echo "$new_offset" | grep -E '^[[:digit:]]+$' &> /dev/null && 
+			[ "$new_offset" -ge "$telegram_offset" ]; then
+				echo -n $new_offset > "$telegram_offset_file"
+				sync
+			fi
+		done
+		if [ "$timer" -ge "$cleanup_ticks" ]; then
+			local timer=0
+			if [ -e "$telegram_chats_file_pending" ]; then
+				local ts=$(date +%s)
+				local existing=($(cat "$telegram_chats_file_pending" | tr '\n' ' '))
+				local cleaned=""
+				for f in "${existing[@]}"; do
+					if [ "$f" != "" ]; then
+						local fts=$((${f//;*/}+$cleanup_interval))
+						if [ "$ts" -lt "$fts" ]; then
+							local cleaned=$(echo -e "$f\n$cleaned")
+						fi
+					fi
+				done
+				echo "$cleaned" | sort -u > "$telegram_chats_file_pending"
+			fi
+		fi
+		sleep $sleep_time
+	done
+}
+
+function t_announcer {
+	local info=$(echo "$1" | grep -E "$telegram_announce_info_regexp_to_extract" | sed 's/^[[:space:]]*//g')
+	local url=$2
+	for repl in "${telegram_announce_info_regexp_replace[@]}"; do
+		if [ "$repl" != "" ]; then
+			local info=$(echo "$info" | sed -e "$repl")
+		fi
+	done
+	local msg=$(printf "$telegram_announce_template" "$info" "$url")
+	local telegram_chats=($(cat "$telegram_chats_file" | sort -u | tr '\n' ' '))
+	for chat_id in "${telegram_chats[@]}"; do
+		if [ "$chat_id" != "" ]; then
+			t_send_msg "$chat_id" "$msg" "Markdown"
+			info "Chat $chat_id announced, exit code: $?"
+		fi
+	done
+}
+
+function t_notifier {
+	local msg=$(printf "$telegram_msg_template" "$@")
+	local telegram_chats=($(cat "$telegram_chats_file" | sort -u | tr '\n' ' '))
+	for chat_id in "${telegram_chats[@]}"; do
+		if [ "$chat_id" != "" ]; then
+			t_send_msg "$chat_id" "$msg" "Markdown"
+			info "Chat $chat_id notified, exit code: $?"
+		fi
+	done
+}
+
+add_watcher t_watcher
+add_announcer t_announcer
+add_notifier t_notifier
+export telegram_base_url telegram_bot_self_name telegram_chats_file telegram_chats_file_pending telegram_otp_seed telegram_offset_file
+
+info "Telegram plugin init complete"
