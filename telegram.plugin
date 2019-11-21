@@ -368,7 +368,7 @@ function t_list {
 			local info=$(transmission-remote "$backend" $transmission_creds -t "$torrent_id" -l)
 			if [ "$info" != "" ]; then
 				if [ $(echo "$info" | wc -l) -gt 3 ]; then
-					local tmp_file=$(mktemp -u torrent_XXXXXXXXXX.txt -p)
+					local tmp_file=$(mktemp -u torrent_XXXXXXXXXX.txt -p /tmp)
 					echo "$info" > "$tmp_file"
 					t_ok "$1" "list" "SOF"
 					t_send_file "$1" "$tmp_file"
