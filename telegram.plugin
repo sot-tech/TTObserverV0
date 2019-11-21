@@ -484,6 +484,8 @@ function t_watcher {
 					esac
 				elif echo "${cmd[0]}" | grep -P "^\/fortune(\Q$telegram_bot_self_name\E:?)?$" &> /dev/null; then
 					t_fortune "$chat"
+				elif echo "${cmd[0]}" | grep -P "^\/start(\Q$telegram_bot_self_name\E:?)?$" &> /dev/null; then
+					t_help "$chat"
 				fi
 			fi
 			if echo "$new_offset" | grep -E '^[[:digit:]]+$' &> /dev/null && 
