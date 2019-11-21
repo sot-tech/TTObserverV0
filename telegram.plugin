@@ -58,8 +58,8 @@ if [ "$telegram_token" == "" ]; then
 	err "Telegram bot token not set"
 	return
 fi
-
-telegram_base_url="https://api.telegram.org/bot${telegram_token}"
+telegram_api_url="https://api.telegram.org"
+telegram_base_url="$telegram_api_url/bot${telegram_token}"
 
 if ! check_app oathtool; then
 	warn "oathtool not found, cannot continue"
@@ -83,13 +83,15 @@ function t_send_msg {
 		--arg pm "$format" \
 		--arg msg "$msg" \
 		'{"chat_id":$id,"parse_mode":$pm,"text":$msg}')
-	curl -s --header 'Content-Type: application/json' -X 'POST' --data "$data" "$telegram_base_url/sendMessage" | jq -M .
+	curl -sS --connect-timeout 3 --retry 5 --header 'Content-Type: application/json' -X 'POST' \
+		--data "$data" "$telegram_base_url/sendMessage" | jq -M .
 }
 
 function t_send_file {
 	local chat_id="${1//;*/}"
 	local out_file="$2"
-	curl -s -X POST -F chat_id="$chat_id" -F document="@${out_file}" "$telegram_base_url/sendDocument" 
+	curl -sS --connect-timeout 3 --retry 5 -X POST -F chat_id="$chat_id" -F document="@${out_file}" \
+		"$telegram_base_url/sendDocument" | jq -M .
 }
 
 function t_parse_args {
@@ -388,11 +390,18 @@ function t_list {
 	fi
 }
 
+function t_fortune {
+	local fortune=$(/usr/games/fortune -a '80%' ru '20%' off)
+	local msg=$(printf '```\n%s\n```' "$fortune")
+	t_send_msg "$1" "$msg" "Markdown"
+}
+
 function t_help {
 	local help=$(echo '```
 	help
 	ehlo
 	status
+	fortune
 	attach	--otp arg --id|--name arg 
 	detach	--otp arg --id|--name arg
 	offset	--otp arg [--set arg]
@@ -411,7 +420,8 @@ function t_watcher {
 	local cleanup_interval=120
 	local cleanup_ticks=$(($cleanup_interval/$sleep_time))
 	local timer=0
-	telegram_bot_self_name=$(curl -s -X GET "$telegram_base_url/getMe" | jq -r '.result.username' | tr -d '[:space:]')
+	telegram_bot_self_name=$(curl -sS --connect-timeout 3 --retry 5 -X GET "$telegram_base_url/getMe" |
+		jq -r '.result.username' | tr -d '[:space:]')
 	if [ "$telegram_bot_self_name" == "" ]; then
 		warn "Telegram bot self name not set"
 	else
@@ -450,6 +460,9 @@ function t_watcher {
 						status)
 							t_status "$chat"
 						;;
+						fortune)
+							t_fortune "$chat"
+						;;
 						attach)
 							t_attach "$chat" "${args[@]}"
 						;;
@@ -469,6 +482,8 @@ function t_watcher {
 							t_cnf "$chat_id" "$func"
 						;;
 					esac
+				elif echo "${cmd[0]}" | grep -P "^\/fortune(\Q$telegram_bot_self_name\E:?)?$" &> /dev/null; then
+					t_fortune "$chat"
 				fi
 			fi
 			if echo "$new_offset" | grep -E '^[[:digit:]]+$' &> /dev/null && 
@@ -530,6 +545,6 @@ function t_notifier {
 add_watcher t_watcher
 add_announcer t_announcer
 add_notifier t_notifier
-export telegram_base_url telegram_chats_file telegram_chats_file_pending telegram_otp_seed telegram_offset_file
+export telegram_api_url telegram_base_url telegram_chats_file telegram_chats_file_pending telegram_otp_seed telegram_offset_file
 
 info "Telegram plugin init complete"
