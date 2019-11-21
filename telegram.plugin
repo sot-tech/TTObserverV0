@@ -530,6 +530,6 @@ function t_notifier {
 add_watcher t_watcher
 add_announcer t_announcer
 add_notifier t_notifier
-export telegram_base_url telegram_bot_self_name telegram_chats_file telegram_chats_file_pending telegram_otp_seed telegram_offset_file
+export telegram_base_url telegram_chats_file telegram_chats_file_pending telegram_otp_seed telegram_offset_file
 
 info "Telegram plugin init complete"
