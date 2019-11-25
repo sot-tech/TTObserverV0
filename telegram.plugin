@@ -391,7 +391,7 @@ function t_list {
 }
 
 function t_fortune {
-	local fortune=$(/usr/games/fortune -a '80%' ru '20%' off)
+	local fortune=$(/usr/games/fortune -a ru)
 	local msg=$(printf '```\n%s\n```' "$fortune")
 	t_send_msg "$1" "$msg" "Markdown"
 }
@@ -420,8 +420,13 @@ function t_watcher {
 	local cleanup_interval=120
 	local cleanup_ticks=$(($cleanup_interval/$sleep_time))
 	local timer=0
-	telegram_bot_self_name=$(curl -sS --connect-timeout 3 --retry 5 -X GET "$telegram_base_url/getMe" |
-		jq -r '.result.username' | tr -d '[:space:]')
+	local max_retry=5
+	local retry=0
+	until telegram_bot_self_name=$(curl -sS --connect-timeout 3 --retry 5 -X GET "$telegram_base_url/getMe" |
+		jq -r '.result.username' | tr -d '[:space:]') || [ "$retry" -ge "$max_retry" ]; do
+		local retry=$(($retry+1))
+		sleep 5
+	done
 	if [ "$telegram_bot_self_name" == "" ]; then
 		warn "Telegram bot self name not set"
 	else
@@ -432,12 +437,12 @@ function t_watcher {
 		telegram_offset=$(cat "$telegram_offset_file" 2> /dev/null | tr -d '[:space:]')
 		if [ "$telegram_offset" != "" ]; then
 			let ++telegram_offset
-			local telegram_offset_arg="-F offset=$telegram_offset"
 		else
 			telegram_offset=0
 		fi
+		local telegram_offset_arg="-F offset=$telegram_offset"
 		export telegram_offset
-		curl -s -X 'GET' $telegram_offset_arg "$telegram_base_url/getUpdates" |
+		curl -s -X 'GET' $telegram_offset_arg -F limit=10 "$telegram_base_url/getUpdates" |
 			jq -r '.result[] | "\(.update_id) \(.message.chat.id);\(.message.chat.username) \(.message.text)", 
 				"\(.update_id) \(.channel_post.chat.id);\(.channel_post.chat.username) \(.channel_post.text)"' | sort |
 		while IFS= read -r msg; do

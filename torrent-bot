@@ -117,7 +117,7 @@ function upload_torrent {
 	local result=1
 	local url=$1
 	local tmp_file=$(mktemp -u)
-	curl -s -o "$tmp_file" "$url"
+	curl -s --max-filesize 2097152 -o "$tmp_file" "$url"
 	if file "$tmp_file" | grep BitTorrent > /dev/null; then
 		info "Found torrent at $url"
 		torrent_info=$(transmission-show "$tmp_file")
@@ -188,7 +188,6 @@ while true; do
 				notify "$n GET"
 			fi
 		fi
-		
 	done
 	let sleep_time=5+$RANDOM%25
 	sleep $sleep_time
