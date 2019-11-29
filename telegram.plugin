@@ -420,7 +420,7 @@ function t_watcher {
 	local cleanup_interval=120
 	local cleanup_ticks=$(($cleanup_interval/$sleep_time))
 	local timer=0
-	local max_retry=5
+	local max_retry=10
 	local retry=0
 	until telegram_bot_self_name=$(curl -sS --connect-timeout 3 --retry 5 -X GET "$telegram_base_url/getMe" |
 		jq -r '.result.username' | tr -d '[:space:]') || [ "$retry" -ge "$max_retry" ]; do
