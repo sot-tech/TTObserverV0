@@ -84,14 +84,14 @@ function t_send_msg {
 		--arg msg "$msg" \
 		'{"chat_id":$id,"parse_mode":$pm,"text":$msg}')
 	curl -sS --connect-timeout 3 --retry 5 --header 'Content-Type: application/json' -X 'POST' \
-		--data "$data" "$telegram_base_url/sendMessage" | jq -M .
+		--data "$data" "$telegram_base_url/sendMessage"
 }
 
 function t_send_file {
 	local chat_id="${1//;*/}"
 	local out_file="$2"
 	curl -sS --connect-timeout 3 --retry 5 -X POST -F chat_id="$chat_id" -F document="@${out_file}" \
-		"$telegram_base_url/sendDocument" | jq -M .
+		"$telegram_base_url/sendDocument"
 }
 
 function t_parse_args {
@@ -420,13 +420,16 @@ function t_watcher {
 	local cleanup_interval=120
 	local cleanup_ticks=$(($cleanup_interval/$sleep_time))
 	local timer=0
-	local max_retry=10
+	local max_retry=30
 	local retry=0
+	until ping -4 api.telegram.org -c 5 > /dev/null; do
+		sleep 5
+	done
 	while [ "$telegram_bot_self_name" == "" ] && [ "$retry" -lt "$max_retry" ]; do
 		telegram_bot_self_name=$(curl -sS --connect-timeout 3 --retry 5 -X GET "$telegram_base_url/getMe" |
 			jq -r '.result.username' | tr -d '[:space:]')
 		local retry=$(($retry+1))
-		sleep 5
+		sleep 10
 	done
 	if [ "$telegram_bot_self_name" == "" ]; then
 		warn "Telegram bot self name not set"
@@ -533,8 +536,18 @@ function t_announcer {
 	local telegram_chats=($(cat "$telegram_chats_file" | sort -u | tr '\n' ' '))
 	for chat_id in "${telegram_chats[@]}"; do
 		if [ "$chat_id" != "" ]; then
-			t_send_msg "$chat_id" "$msg" "Markdown"
-			info "Chat $chat_id announced, exit code: $?"
+			local i=0
+			local max_tries=30
+			while ! t_send_msg "$chat_id" "$msg" "Markdown" && [ "$i" -lt "$max_tries" ]; do
+				warn "Error while announcing chat $chat_id"
+				local i=$(($i+1))
+				sleep $i
+			done
+			if [ "$i" -lt "$max_tries" ]; then
+				info "Chat $chat_id announced"
+			else
+				err "Chat $chat_id NOT announced"
+			fi
 		fi
 	done
 }
@@ -544,8 +557,18 @@ function t_notifier {
 	local telegram_chats=($(cat "$telegram_chats_file" | sort -u | tr '\n' ' '))
 	for chat_id in "${telegram_chats[@]}"; do
 		if [ "$chat_id" != "" ]; then
-			t_send_msg "$chat_id" "$msg" "Markdown"
-			info "Chat $chat_id notified, exit code: $?"
+			local i=0
+			local max_tries=30
+			while ! t_send_msg "$chat_id" "$msg" "Markdown" && [ "$i" -lt "$max_tries" ]; do
+				warn "Error while notifying chat $chat_id"
+				local i=$(($i+1))
+				sleep $i
+			done
+			if [ "$i" -lt "$max_tries" ]; then
+				info "Chat $chat_id notified"
+			else
+				err "Chat $chat_id NOT notified"
+			fi
 		fi
 	done
 }
