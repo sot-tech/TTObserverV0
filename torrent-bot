@@ -70,6 +70,12 @@ function check_app {
 
 req_apps=(tee sed grep cat curl awk tr sort jq transmission-show transmission-remote)
 
+if [ "$transmission_url" != "" ]; then
+	req_apps+=( transmission-remote )
+else
+	warn "transmission_url not set, bot won't upload torrents to transmission"
+fi
+
 if ! source "$config_file"; then
 	err "Config file $config_file not found"
 	exit 1
@@ -125,23 +131,27 @@ function upload_torrent {
 		if [ "$torrent_name" == "" ]; then
 			err "Torrent name not defined"
 		else
-			info "Searching for old torrent $torrent_name"
-			existing_torrent=$(transmission-remote "$transmission_url" $transmission_creds -l | grep -P "  +\Q${torrent_name}\E$")
-			if [ "$existing_torrent" == "" ]; then
-				warn "Old torrent for name $torrent_name not found."
-			else
-				torrent_id=$(echo "$existing_torrent" | awk '{print $1}' | tr -d '[:punct:][:space:][:alpha:]')
-				if [ "$torrent_id" == "" ]; then
-					err "Id for existing torrent $existing_torrent not found"
+			if [ "$transmission_url" != "" ]; then
+				info "Searching for old torrent $torrent_name"
+				existing_torrent=$(transmission-remote "$transmission_url" $transmission_creds -l | grep -P "  +\Q${torrent_name}\E$")
+				if [ "$existing_torrent" == "" ]; then
+					warn "Old torrent for name $torrent_name not found."
 				else
-					transmission-remote "$transmission_url" $transmission_creds -t $torrent_id -r
-					info "Previous torrent $torrent_name (id: $torrent_id) has been deleted"
+					torrent_id=$(echo "$existing_torrent" | awk '{print $1}' | tr -d '[:punct:][:space:][:alpha:]')
+					if [ "$torrent_id" == "" ]; then
+						err "Id for existing torrent $existing_torrent not found"
+					else
+						transmission-remote "$transmission_url" $transmission_creds -t $torrent_id -r
+						info "Previous torrent $torrent_name (id: $torrent_id) has been deleted"
+					fi
 				fi
-			fi
-			if transmission-remote "$transmission_url" $transmission_creds -a "$tmp_file" $transmission_down_dir --no-start-paused; then
-				info "Added new torrent $torrent_name"
+				if transmission-remote "$transmission_url" $transmission_creds -a "$tmp_file" $transmission_down_dir --no-start-paused; then
+					info "Added new torrent $torrent_name"
+				else
+					err "Unable to add torrent $torrent_name!"
+				fi
 			else
-				err "Unable to add torrent $torrent_name!"
+				warn "transmission_url not set, bot won't upload torrent to transmission"
 			fi
 		fi
 		local result=0
