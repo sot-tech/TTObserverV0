@@ -68,7 +68,7 @@ function check_app {
 	return 0
 }
 
-req_apps=(tee sed grep cat curl awk tr sort jq transmission-show transmission-remote)
+req_apps=(tee sed grep cat curl file awk tr sort jq transmission-show)
 
 if [ "$transmission_url" != "" ]; then
 	req_apps+=( transmission-remote )
