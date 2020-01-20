@@ -14,7 +14,7 @@ Uses:
  
 # Usage
 ## Quick start
-1. Create config directory like,
+1. Create config directory
 2. Delete or rename all `*.plugin` files to `*.plugin_noload`
 3. Create `target.config` like `conf.example/target.config` with own values,
 3. Run `torrent-bot /path/to/conf/dir`
@@ -100,6 +100,7 @@ In this case, there is two person: you, and chat/channel owner.
 @NameOfBot ehlo
 ```
 Bot registers _pending_ chat (id and name), it means, that this chat should be verified by you
+
 2. You send 
 ```
 @NameOfBot attach --name name_of_chat --otp 123456
