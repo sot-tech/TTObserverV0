@@ -61,8 +61,13 @@ fi
 telegram_api_url="https://api.telegram.org"
 telegram_base_url="$telegram_api_url/bot${telegram_token}"
 
+if ! check_app jq; then
+	err "jq not found, cannot continue"
+	return
+fi
+
 if ! check_app oathtool; then
-	warn "oathtool not found, cannot continue"
+	err "oathtool not found, cannot continue"
 	return
 fi
 
